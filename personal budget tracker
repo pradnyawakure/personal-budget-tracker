@@ -1,0 +1,734 @@
+README.md
+# Personal Budget Tracker
+
+Final-year CSE project — full-stack Personal Budget Tracker with:
+- Transaction CRUD (income/expense)
+- Category-based monthly budgets & progress tracking
+- Group expense handling with splits and settlements
+- Visualizations (Chart.js) and basic JWT auth
+
+## Quick start (local)
+
+### Prerequisites
+- Node.js >= 18
+- npm or yarn
+- MongoDB (local or Atlas)
+
+### Backend
+```bash
+cd backend
+cp .env.example .env   # set MONGO_URI and JWT_SECRET
+npm install
+npm run dev            # nodemon server on port 5000 by default
+# optional: seed data
+node scripts/seed.js
+
+
+BACKEND
+MONGO_URI=<your mongo connection string>
+JWT_SECRET=<a long random secret string>
+PORT=5000
+
+
+FRONTEND
+VITE_API_URL=http://localhost:5000/api
+
+LICENSE
+
+---
+
+### `LICENSE`
+```text
+MIT License
+
+Copyright (c) 2025 <Your Name>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the “Software”), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+... (complete MIT text) ...
+
+
+.GITIGNORE
+# Node / JavaScript
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+
+# Logs
+logs/
+*.log
+
+# Runtime / temp
+.DS_Store
+.env
+.env.*.local
+/.cache
+
+# Build outputs
+dist/
+build/
+.vite/
+.VS/
+.idea/
+.vscode/
+
+# Misc
+coverage/
+
+
+BACKEND
+{
+  "name": "pbt-backend",
+  "version": "1.0.0",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.0",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.0",
+    "mongoose": "^8.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22"
+  }
+}
+
+
+backend/.env.example
+MONGO_URI=mongodb+srv://<user>:<pass>@cluster0.mongodb.net/pbt_db?retryWrites=true&w=majority
+JWT_SECRET=REPLACE_WITH_A_SECRET
+PORT=5000
+
+
+backend/src/app.js
+const express = require('express');
+const cors = require('cors');
+const authRoutes = require('./routes/auth');
+const transactionRoutes = require('./routes/transactions');
+const budgetRoutes = require('./routes/budgets');
+const groupRoutes = require('./routes/groups');
+const errorHandler = require('./middleware/errorHandler');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.use('/api/auth', authRoutes);
+app.use('/api/transactions', transactionRoutes);
+app.use('/api/budgets', budgetRoutes);
+app.use('/api/groups', groupRoutes);
+
+app.use(errorHandler);
+
+module.exports = app;
+
+backend/src/server.js
+require('dotenv').config();
+const mongoose = require('mongoose');
+const app = require('./app');
+const connectDB = require('./config/db');
+
+const PORT = process.env.PORT || 5000;
+
+connectDB(process.env.MONGO_URI)
+  .then(() => {
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  })
+  .catch(err => {
+    console.error('Failed to connect to DB:', err);
+    process.exit(1);
+  });
+
+backend/src/config/db.js
+const mongoose = require('mongoose');
+
+const connectDB = async (uri) => {
+  await mongoose.connect(uri, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+  });
+  console.log('MongoDB connected');
+};
+
+module.exports = connectDB;
+
+backend/src/middleware/errorHandler.js
+module.exports = (err, req, res, next) => {
+  console.error(err);
+  res.status(err.status || 500).json({ error: err.message || 'Server error' });
+};
+
+backend/src/middleware/auth.js
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+
+module.exports = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer '))
+    return res.status(401).json({ msg: 'No token provided' });
+
+  const token = authHeader.split(' ')[1];
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = await User.findById(payload.id).select('-password');
+    next();
+  } catch (err) {
+    return res.status(401).json({ msg: 'Token invalid' });
+  }
+};
+
+backend/src/models/User.js
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+const UserSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true }
+}, { timestamps: true });
+
+UserSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next();
+  const salt = await bcrypt.genSalt(10);
+  this.password = await bcrypt.hash(this.password, salt);
+  next();
+});
+
+UserSchema.methods.comparePassword = function(candidate) {
+  return bcrypt.compare(candidate, this.password);
+};
+
+module.exports = mongoose.model('User', UserSchema);
+
+backend/src/models/Transaction.js
+const mongoose = require('mongoose');
+
+const TransactionSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  amount: { type: Number, required: true },
+  type: { type: String, enum: ['income', 'expense'], required: true },
+  category: { type: String, required: true },
+  date: { type: Date, default: Date.now },
+  notes: { type: String },
+  group: { type: mongoose.Schema.Types.ObjectId, ref: 'Group' },
+  splits: [{ member: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, share: Number }]
+}, { timestamps: true });
+
+module.exports = mongoose.model('Transaction', TransactionSchema);
+
+backend/src/models/Budget.js
+const mongoose = require('mongoose');
+
+const BudgetSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  category: { type: String, required: true },
+  amount: { type: Number, required: true },
+  month: { type: String, required: true }  // e.g. "2025-09"
+}, { timestamps: true });
+
+module.exports = mongoose.model('Budget', BudgetSchema);
+
+backend/src/models/Group.js
+const mongoose = require('mongoose');
+
+const GroupSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  members: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  balances: [{ for: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, amount: Number }]
+}, { timestamps: true });
+
+module.exports = mongoose.model('Group', GroupSchema);
+
+backend/src/routes/auth.js
+const express = require('express');
+const router = express.Router();
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+
+// signup
+router.post('/signup', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    const existing = await User.findOne({ email });
+    if (existing) return res.status(400).json({ msg: 'Email already in use' });
+    const user = new User({ name, email, password });
+    await user.save();
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '6h' });
+    res.json({ token, user: { id: user._id, name: user.name, email: user.email } });
+  } catch (err) {
+    res.status(500).json({ msg: 'Server error' });
+  }
+});
+
+// login
+router.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json({ msg: 'Invalid credentials' });
+    const isMatch = await user.comparePassword(password);
+    if (!isMatch) return res.status(400).json({ msg: 'Invalid credentials' });
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '6h' });
+    res.json({ token, user: { id: user._id, name: user.name, email: user.email } });
+  } catch (err) {
+    res.status(500).json({ msg: 'Server error' });
+  }
+});
+
+module.exports = router;
+
+backend/src/routes/transactions.js
+const express = require('express');
+const router = express.Router();
+const auth = require('../middleware/auth');
+const Transaction = require('../models/Transaction');
+const Group = require('../models/Group');
+
+// Create
+router.post('/', auth, async (req, res) => {
+  try {
+    const t = new Transaction({ ...req.body, user: req.user._id });
+    await t.save();
+    res.json(t);
+  } catch (err) {
+    res.status(500).json({ msg: 'Server error' });
+  }
+});
+
+// Read with filters
+router.get('/', auth, async (req, res) => {
+  try {
+    const { from, to, category, type } = req.query;
+    const query = { user: req.user._id };
+    if (category) query.category = category;
+    if (type) query.type = type;
+    if (from || to) query.date = {};
+    if (from) query.date.$gte = new Date(from);
+    if (to) query.date.$lte = new Date(to);
+    const list = await Transaction.find(query).sort({ date: -1 });
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ msg: 'Server error' });
+  }
+});
+
+// Update
+router.put('/:id', auth, async (req, res) => {
+  try {
+    const updated = await Transaction.findOneAndUpdate(
+      { _id: req.params.id, user: req.user._id },
+      req.body,
+      { new: true }
+    );
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ msg: 'Server error' });
+  }
+});
+
+// Delete
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    await Transaction.findOneAndDelete({ _id: req.params.id, user: req.user._id });
+    res.json({ msg: 'Deleted' });
+  } catch (err) {
+    res.status(500).json({ msg: 'Server error' });
+  }
+});
+
+module.exports = router;
+
+backend/src/routes/budgets.js
+const express = require('express');
+const router = express.Router();
+const auth = require('../middleware/auth');
+const Budget = require('../models/Budget');
+
+router.post('/', auth, async (req, res) => {
+  try {
+    const { category, amount, month } = req.body;
+    const existing = await Budget.findOne({ user: req.user._id, category, month });
+    if (existing) {
+      existing.amount = amount;
+      await existing.save();
+      return res.json(existing);
+    }
+    const b = new Budget({ user: req.user._id, category, amount, month });
+    await b.save();
+    res.json(b);
+  } catch (err) {
+    res.status(500).json({ msg: 'Server error' });
+  }
+});
+
+router.get('/', auth, async (req, res) => {
+  try {
+    const { month } = req.query;
+    const q = { user: req.user._id };
+    if (month) q.month = month;
+    const list = await Budget.find(q).sort({ category: 1 });
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ msg: 'Server error' });
+  }
+});
+
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    await Budget.findOneAndDelete({ _id: req.params.id, user: req.user._id });
+    res.json({ msg: 'Deleted' });
+  } catch (err) {
+    res.status(500).json({ msg: 'Server error' });
+  }
+});
+
+module.exports = router;
+
+backend/src/routes/groups.js
+const express = require('express');
+const router = express.Router();
+const auth = require('../middleware/auth');
+const Group = require('../models/Group');
+
+router.post('/', auth, async (req, res) => {
+  try {
+    const { name, members } = req.body;
+    const group = new Group({ name, members, balances: members.map(m => ({ for: m, amount: 0 })) });
+    await group.save();
+    res.json(group);
+  } catch (err) {
+    res.status(500).json({ msg: 'Server error' });
+  }
+});
+
+router.get('/', auth, async (req, res) => {
+  try {
+    const groups = await Group.find({ members: req.user._id }).populate('members', 'name email');
+    res.json(groups);
+  } catch (err) {
+    res.status(500).json({ msg: 'Server error' });
+  }
+});
+
+router.post('/:id/settle', auth, async (req, res) => {
+  try {
+    const { payerId, payeeId, amount } = req.body;
+    const group = await Group.findById(req.params.id);
+    if (!group) return res.status(404).json({ msg: 'Group not found' });
+    group.balances = group.balances || [];
+    const payer = group.balances.find(b => b.for.toString() === payerId);
+    const payee = group.balances.find(b => b.for.toString() === payeeId);
+    if (payer) payer.amount = (payer.amount || 0) - amount;
+    else group.balances.push({ for: payerId, amount: -amount });
+    if (payee) payee.amount = (payee.amount || 0) + amount;
+    else group.balances.push({ for: payeeId, amount: amount });
+    await group.save();
+    res.json(group);
+  } catch (err) {
+    res.status(500).json({ msg: 'Server error' });
+  }
+});
+
+module.exports = router;
+
+backend/scripts/seed.js
+const mongoose = require('mongoose');
+require('dotenv').config();
+const User = require('../src/models/User');
+const Transaction = require('../src/models/Transaction');
+
+async function run() {
+  await mongoose.connect(process.env.MONGO_URI);
+  await User.deleteMany({});
+  await Transaction.deleteMany({});
+  const user = new User({ name: 'Test User', email: 'test@example.com', password: 'password123' });
+  await user.save();
+  const txs = [
+    { user: user._id, amount: 50000, type: 'income', category: 'Salary', date: new Date() },
+    { user: user._id, amount: 200, type: 'expense', category: 'Food', date: new Date() },
+    { user: user._id, amount: 150, type: 'expense', category: 'Transport', date: new Date() }
+  ];
+  await Transaction.insertMany(txs);
+  console.log('Seeded');
+  process.exit(0);
+}
+
+run();
+
+Frontend
+frontend/package.json
+{
+  "name": "pbt-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios": "^1.4.0",
+    "chart.js": "^4.5.0",
+    "react": "^18.2.0",
+    "react-chartjs-2": "^5.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.12.0"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0"
+  }
+}
+
+frontend/index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Personal Budget Tracker</title>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
+</body>
+</html>
+
+frontend/.env
+VITE_API_URL=http://localhost:5000/api
+
+frontend/src/main.jsx
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import { BrowserRouter } from 'react-router-dom';
+import App from './App';
+import './styles.css';
+
+createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <BrowserRouter>
+      <App />
+    </BrowserRouter>
+  </React.StrictMode>
+);
+
+frontend/src/App.jsx
+import React from 'react';
+import { Routes, Route, Link } from 'react-router-dom';
+import Dashboard from './pages/Dashboard';
+import Transactions from './pages/Transactions';
+import Groups from './pages/Groups';
+
+export default function App() {
+  return (
+    <div className="app">
+      <nav style={{ padding: 10, borderBottom: '1px solid #ddd' }}>
+        <Link to="/" style={{ marginRight: 10 }}>Dashboard</Link>
+        <Link to="/transactions" style={{ marginRight: 10 }}>Transactions</Link>
+        <Link to="/groups">Groups</Link>
+      </nav>
+      <main style={{ padding: 20 }}>
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/transactions" element={<Transactions />} />
+          <Route path="/groups" element={<Groups />} />
+        </Routes>
+      </main>
+    </div>
+  );
+}
+
+frontend/src/api/api.js
+import axios from 'axios';
+
+const API = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:5000/api' });
+
+API.interceptors.request.use(config => {
+  const token = localStorage.getItem('token');
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+export default API;
+
+frontend/src/pages/Dashboard.jsx
+import React, { useEffect, useState } from 'react';
+import API from '../api/api';
+import { Bar, Pie } from 'react-chartjs-2';
+import { Chart, CategoryScale, LinearScale, BarElement, ArcElement, Tooltip, Legend } from 'chart.js';
+
+Chart.register(CategoryScale, LinearScale, BarElement, ArcElement, Tooltip, Legend);
+
+export default function Dashboard() {
+  const [transactions, setTransactions] = useState([]);
+
+  useEffect(() => {
+    API.get('/transactions').then(res => setTransactions(res.data)).catch(() => {});
+  }, []);
+
+  const categories = Array.from(new Set(transactions.map(t => t.category)));
+  const categoryTotals = categories.map(cat =>
+    transactions.filter(t => t.category === cat && t.type === 'expense')
+                .reduce((s, x) => s + x.amount, 0)
+  );
+
+  const pieData = { labels: categories, datasets: [{ label: 'Spending', data: categoryTotals }] };
+
+  const monthly = {};
+  transactions.forEach(t => {
+    const m = new Date(t.date).toISOString().slice(0, 7);
+    monthly[m] = monthly[m] || { income: 0, expense: 0 };
+    monthly[m][t.type] += t.amount;
+  });
+  const months = Object.keys(monthly).sort();
+  const barData = {
+    labels: months,
+    datasets: [
+      { label: 'Income', data: months.map(m => monthly[m].income) },
+      { label: 'Expense', data: months.map(m => monthly[m].expense) }
+    ]
+  };
+
+  return (
+    <div>
+      <h2>Dashboard</h2>
+      <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
+        <div style={{ width: 350 }}>
+          <h4>Category-wise</h4>
+          <Pie data={pieData} />
+        </div>
+        <div style={{ width: 650 }}>
+          <h4>Monthly Income vs Expense</h4>
+          <Bar data={barData} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+frontend/src/pages/Transactions.jsx
+import React from 'react';
+import TransactionForm from '../components/TransactionForm';
+import TransactionsTable from '../components/TransactionsTable';
+
+export default function Transactions() {
+  return (
+    <div>
+      <h2>Transactions</h2>
+      <TransactionForm />
+      <TransactionsTable />
+    </div>
+  );
+}
+
+frontend/src/pages/Groups.jsx
+import React, { useEffect, useState } from 'react';
+import API from '../api/api';
+
+export default function Groups() {
+  const [groups, setGroups] = useState([]);
+
+  useEffect(() => {
+    API.get('/groups').then(r => setGroups(r.data)).catch(() => {});
+  }, []);
+
+  return (
+    <div>
+      <h2>Groups</h2>
+      <div>
+        {groups.map(g => (
+          <div key={g._id} style={{ border: '1px solid #ddd', padding: 10, marginBottom: 8 }}>
+            <strong>{g.name}</strong>
+            <div>Members: {g.members.map(m => m.name).join(', ')}</div>
+            <div>Balances: {g.balances ? JSON.stringify(g.balances) : '[]'}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+frontend/src/components/TransactionForm.jsx
+import React, { useState } from 'react';
+import API from '../api/api';
+
+export default function TransactionForm() {
+  const [form, setForm] = useState({ amount: '', type: 'expense', category: 'Food', date: new Date().toISOString().slice(0, 10), notes: '' });
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.amount || isNaN(Number(form.amount))) {
+      alert('Enter valid amount');
+      return;
+    }
+    try {
+      await API.post('/transactions', { ...form, amount: Number(form.amount) });
+      window.location.reload();
+    } catch (err) {
+      alert('Error adding transaction');
+    }
+  };
+
+  return (
+    <form onSubmit={submit} style={{ marginBottom: 20 }}>
+      <input value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} placeholder="Amount" required />
+      <select value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}>
+        <option value="expense">Expense</option>
+        <option value="income">Income</option>
+      </select>
+      <input value={form.category} onChange={e => setForm({ ...form, category: e.target.value })} placeholder="Category" />
+      <input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} />
+      <input value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} placeholder="Notes" />
+      <button type="submit">Add</button>
+    </form>
+  );
+}
+
+frontend/src/components/TransactionsTable.jsx
+import React, { useEffect, useState } from 'react';
+import API from '../api/api';
+
+export default function TransactionsTable() {
+  const [list, setList] = useState([]);
+
+  useEffect(() => {
+    API.get('/transactions').then(r => setList(r.data)).catch(() => {});
+  }, []);
+
+  return (
+    <table border={1} cellPadding={6} style={{ width: '100%', borderCollapse: 'collapse' }}>
+      <thead>
+        <tr><th>Date</th><th>Type</th><th>Category</th><th>Amount</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        {list.map(t => (
+          <tr key={t._id}>
+            <td>{new Date(t.date).toLocaleDateString()}</td>
+            <td>{t.type}</td>
+            <td>{t.category}</td>
+            <td>{t.amount}</td>
+            <td>{t.notes}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+frontend/src/styles.css
+body { font-family: Arial, sans-serif; margin:0; padding:0; }
+.app nav a { color:#333; text-decoration:none; margin-right:10px; }
+input, select { margin-right:8px; margin-bottom:6px; padding:6px; }
+button { padding:6px 10px; cursor:pointer
